@@ -486,13 +486,17 @@
         // Mengambil marker panah; kalau belum ada, dibuat dulu.
         // color   : warna panah
         // reverse : true untuk panah yang menghadap ke arah sebaliknya (ujung awal garis)
-        _getMarker(color = 'black', reverse = false) {
-            const key = `${reverse ? 'rev' : 'fwd'}|${color}`;
+        // skala   : pengali ukuran panah (bawaan 1); ukuran dasarnya sudah ikut ketebalan garis
+        _getMarker(color = 'black', reverse = false, skala = 1) {
+            if (typeof skala !== 'number' || !isFinite(skala) || skala <= 0) skala = 1;
+            const key = `${reverse ? 'rev' : 'fwd'}|${color}|${skala}`;
             if (this._markers.has(key)) return this._markers.get(key);
 
             const id = this._id(`marker-${this._markers.size}`);
+            // viewBox tetap 10x7 supaya isi panah ikut membesar/mengecil mengikuti markerWidth/Height
             const marker = this._el('marker', {
-                id, markerWidth: 10, markerHeight: 7,
+                id, viewBox: '0 0 10 7',
+                markerWidth: this._bulat(10 * skala), markerHeight: this._bulat(7 * skala),
                 refX: reverse ? 1 : 9, refY: 3.5, orient: 'auto'
             }, this.defs);
             this._el('polygon', {
@@ -503,6 +507,33 @@
 
             this._markers.set(key, id);
             return id;
+        }
+
+        // Memasang kepala panah pada garis/kurva TERBUKA sesuai opsi:
+        //   panah: true | 'akhir'  -> panah di ujung akhir
+        //   panah: 'awal'          -> panah di ujung awal
+        //   panah: 'dua'           -> panah di kedua ujung
+        //   panahAwal / panahAkhir : true untuk memilih ujung secara eksplisit
+        //   panahWarna             : warna panah (bawaan: warna garis)
+        //   ukuranPanah            : pengali ukuran panah (bawaan 1; 0.5 = setengah, 2 = dua kali).
+        //                            Ukuran dasar sudah ikut strokeWidth, jadi garis tebal -> panah besar.
+        _pasangPanah(el, options) {
+            if (!el || !options) return;
+            let awal = options.panahAwal === true;
+            let akhir = options.panahAkhir === true;
+
+            if (options.panah === true || options.panah === 'akhir') akhir = true;
+            else if (options.panah === 'awal') awal = true;
+            else if (options.panah === 'dua') awal = akhir = true;
+
+            if (!awal && !akhir) return;
+            const warna = options.panahWarna || options.stroke || this.svg.getAttribute('stroke') || 'black';
+            const skala = options.ukuranPanah;
+            if (this._ada(skala) && !(typeof skala === 'number' && isFinite(skala) && skala > 0)) {
+                console.warn("GeoSVG: ukuranPanah harus angka lebih dari 0, dipakai ukuran bawaan (1).");
+            }
+            if (awal) el.setAttribute('marker-start', `url(#${this._getMarker(warna, true, skala)})`);
+            if (akhir) el.setAttribute('marker-end', `url(#${this._getMarker(warna, false, skala)})`);
         }
 
         // true jika nilai benar-benar diisi (0 dan "" tetap dianggap diisi)
@@ -978,6 +1009,7 @@
                 : { x1, y1, x2, y2, display: 'none' });
 
             this._applyOptions(line, options);
+            this._pasangPanah(line, options);
             this._tambah(line, 'shapes');
 
             const u = klip || { x1, y1, x2, y2 };
@@ -1010,6 +1042,7 @@
 
             const line = this._el('line', { x1, y1, x2, y2 });
             this._applyOptions(line, options);
+            this._pasangPanah(line, options);
             this._tambah(line, 'shapes');
             return this._pasangLabelGaris(line, Number(x1), Number(y1), Number(x2), Number(y2), options);
         }
@@ -1422,10 +1455,7 @@
 
             const polyline = this._el('polyline', { points: ptsString, fill: 'none' });
             this._applyOptions(polyline, options);
-            if (options.panah === true) {
-                const warna = options.stroke || this.svg.getAttribute('stroke') || 'black';
-                polyline.setAttribute('marker-end', `url(#${this._getMarker(warna)})`);
-            }
+            this._pasangPanah(polyline, options);
             this._tambah(polyline, 'shapes');
             return polyline;
         }
@@ -2196,6 +2226,7 @@
             const path = this._el('path', { d });
             if (!options.fill) options.fill = 'none';
             this._applyOptions(path, options);
+            this._pasangPanah(path, options);
             this._tambah(path, 'shapes');
             return path;
         }
@@ -2240,6 +2271,54 @@
             const path = this._el('path', { d: d.trim() });
             if (typeof options.fill === 'undefined') options.fill = 'none';
             this._applyOptions(path, options);
+            this._pasangPanah(path, options);
+            this._tambah(path, 'shapes');
+            return path;
+        }
+
+        // ===== BENTUK GABUNGAN =====
+
+        // Bentuk gabungan dari beberapa segmen (garis, kubik, kuadratik) dalam SATU path.
+        // awal   : titik awal [x, y] atau {x, y}
+        // segmen : daftar langkah berurutan, tiap langkah salah satu dari:
+        //   { garis: [x, y] }                -> garis lurus ke titik itu
+        //   { kubik: [c1, c2, akhir] }       -> kurva Bezier kubik
+        //   { kuadratik: [c, akhir] }        -> kurva Bezier kuadratik
+        // options:
+        //   tutup : true -> bentuk ditutup (kembali ke titik awal) dan bisa diisi warna
+        //   stroke, fill, strokeWidth, dashed, dst. seperti objek lain
+        //   panah / panahAwal / panahAkhir / panahWarna / ukuranPanah : kepala panah (hanya jika bentuk TIDAK ditutup)
+        buatBentuk(awal, segmen, options = {}) {
+            options = { ...options };
+            const mulai = this._pt(awal);
+            if (!mulai || !Array.isArray(segmen) || segmen.length === 0) {
+                return this._gagal("buatBentuk: butuh titik awal dan minimal 1 segmen");
+            }
+
+            let d = `M ${mulai.x},${mulai.y}`;
+            for (const s of segmen) {
+                let kode, titik;
+                if (s && s.garis) { kode = 'L'; titik = [s.garis]; }
+                else if (s && s.kuadratik) { kode = 'Q'; titik = s.kuadratik; }
+                else if (s && s.kubik) { kode = 'C'; titik = s.kubik; }
+                else return this._gagal("buatBentuk: tiap segmen harus berisi garis, kuadratik, atau kubik");
+
+                const jumlah = kode === 'C' ? 3 : kode === 'Q' ? 2 : 1;
+                if (!Array.isArray(titik) || titik.length !== jumlah) {
+                    return this._gagal(`buatBentuk: segmen '${kode}' butuh ${jumlah} titik`);
+                }
+                const p = titik.map(t => this._pt(t));
+                if (p.some(t => !t)) {
+                    return this._gagal("buatBentuk: semua titik harus [x, y] atau {x, y} berisi angka");
+                }
+                d += ` ${kode} ` + p.map(t => `${t.x},${t.y}`).join(' ');
+            }
+            if (options.tutup) d += ' Z';
+
+            const path = this._el('path', { d });
+            if (!options.fill) options.fill = 'none';
+            this._applyOptions(path, options);
+            if (!options.tutup) this._pasangPanah(path, options);
             this._tambah(path, 'shapes');
             return path;
         }
@@ -2568,13 +2647,95 @@
                 });
             }
 
-            // Satu titik (juga daftar berisi satu titik)
+            return this._gambarBayangan('buatRefleksi', bayangan, options);
+        }
+
+        // ===== TRANSLASI (PERGESERAN) =====
+
+        // Membaca pergeseran:
+        //   - dua angka (dx, dy)
+        //   - vektor [dx, dy], { x, y }, atau { dx, dy }
+        //   - pasangan titik [dari, ke] -> geser = ke - dari
+        // Mengembalikan { dx, dy, duaAngka }, atau null jika tidak valid.
+        _bacaGeser(geser, argBerikut) {
+            if (this._semuaAngka(geser, argBerikut)) {
+                return { dx: Number(geser), dy: Number(argBerikut), duaAngka: true };
+            }
+            const v = this._pt(geser);
+            if (v) return { dx: v.x, dy: v.y, duaAngka: false };
+            if (geser && !Array.isArray(geser) && typeof geser === 'object' && this._semuaAngka(geser.dx, geser.dy)) {
+                return { dx: Number(geser.dx), dy: Number(geser.dy), duaAngka: false };
+            }
+            if (Array.isArray(geser) && geser.length === 2) {
+                const dari = this._pt(geser[0]), ke = this._pt(geser[1]);
+                if (dari && ke) return { dx: ke.x - dari.x, dy: ke.y - dari.y, duaAngka: false };
+            }
+            return null;
+        }
+
+        // Menghitung bayangan hasil translasi (pergeseran).
+        //   objek : satu titik, atau daftar titik (dua titik = garis, tiga atau lebih = poligon)
+        //   geser : [dx, dy], {x, y}, {dx, dy}, pasangan titik [dari, ke], atau dua argumen angka (dx, dy)
+        // Mengembalikan [x, y] untuk satu titik, atau daftar [[x, y], ...]. null jika input salah.
+        hitungTranslasi(objek, geser, dy) {
+            const g = this._bacaGeser(geser, dy);
+            if (!g) {
+                return this._gagal("hitungTranslasi: 'geser' harus [dx, dy], {x, y}, {dx, dy}, pasangan titik [dari, ke], atau dua angka (dx, dy)");
+            }
+
+            const satu = this._pt(objek);
+            if (satu) return [satu.x + g.dx, satu.y + g.dy];
+
+            if (Array.isArray(objek) && objek.length > 0) {
+                const daftar = objek.map(t => this._pt(t));
+                if (daftar.every(Boolean)) {
+                    return daftar.map(t => [t.x + g.dx, t.y + g.dy]);
+                }
+            }
+            return this._gagal("hitungTranslasi: objek harus titik [x, y] / {x, y} atau daftar titik");
+        }
+
+        // Menggambar bayangan hasil translasi. Mengembalikan elemen bayangannya (titik, garis, atau poligon).
+        //   objek / geser    : seperti hitungTranslasi; boleh juga dipanggil buatTranslasi(objek, dx, dy, options)
+        //   options          : opsi gaya untuk bentuk yang digambar (stroke, fill, dashed, label, dst) plus:
+        //     bentuk         : 2 titik -> 'garis' (bawaan) | 'segmen' | 'sinar';  3+ titik -> 'poligon' (bawaan) | 'polyline'
+        //     titik          : true = gambar juga titik di tiap titik bayangan
+        //     labelTitik     : daftar label titik bayangan, mis. ["A'", "B'", "C'"]
+        //     penghubung     : true = garis putus-putus dari tiap titik asal ke bayangannya
+        //     panahPenghubung: true = penghubung diberi panah menuju bayangan (buatVektor)
+        //     gayaPenghubung : gaya garis penghubung, mis. { stroke: 'orange' }
+        buatTranslasi(objek, geser, c = {}, d = {}) {
+            const g = this._bacaGeser(geser, c);
+            const options = (g && g.duaAngka ? d : c) || {};
+            const hasil = g ? this.hitungTranslasi(objek, g.dx, g.dy) : this.hitungTranslasi(objek, geser);
+            if (!hasil) return null;
+
+            const tunggal = this._pt(objek) !== null;
+            const asal = tunggal ? [this._pt(objek)] : objek.map(t => this._pt(t));
+            const bayangan = tunggal ? [hasil] : hasil;                  // daftar [x, y]
+
+            // Garis penghubung (titik yang tidak bergeser tidak diberi penghubung)
+            if (options.penghubung === true) {
+                const gaya = { stroke: '#888', strokeWidth: 1, dashed: true, ...(options.gayaPenghubung || {}) };
+                const metodeHubung = options.panahPenghubung === true ? 'buatVektor' : 'buatSegmen';
+                asal.forEach((t, i) => {
+                    if (Math.hypot(bayangan[i][0] - t.x, bayangan[i][1] - t.y) > 1e-9) {
+                        this[metodeHubung]([t.x, t.y], bayangan[i], gaya);
+                    }
+                });
+            }
+
+            return this._gambarBayangan('buatTranslasi', bayangan, options);
+        }
+
+        // Helper bersama untuk menggambar bayangan hasil transformasi (titik, garis/segmen/sinar, poligon/polyline).
+        _gambarBayangan(namaMethod, bayangan, options) {
             if (bayangan.length === 1) return this.buatTitik(bayangan[0], options);
 
             const SAH = bayangan.length === 2 ? ['garis', 'segmen', 'sinar'] : ['poligon', 'polyline'];
             let bentuk = this._ada(options.bentuk) ? options.bentuk : SAH[0];
             if (!SAH.includes(bentuk)) {
-                this._gagal(`buatRefleksi: bentuk '${bentuk}' tidak cocok untuk ${bayangan.length} titik. Pilihan: ${SAH.join(', ')}. Dipakai '${SAH[0]}'.`);
+                this._gagal(`${namaMethod}: bentuk '${bentuk}' tidak cocok untuk ${bayangan.length} titik. Pilihan: ${SAH.join(', ')}. Dipakai '${SAH[0]}'.`);
                 bentuk = SAH[0];
             }
 
@@ -2596,6 +2757,217 @@
                 });
             }
             return el;
+        }
+
+        // ===== ROTASI (PERPUTARAN) =====
+
+        // Membaca argumen (sudut, pusat, options) atau (pusat, sudut, options).
+        // Pusat bawaan: [0, 0]. Mengembalikan { sudut, pusat, options } atau null.
+        _bacaRotasi(a, b, c) {
+            if (this._semuaAngka(a)) {
+                const sudut = Number(a);
+                if (b === undefined || b === null) {
+                    return { sudut, pusat: { x: 0, y: 0 }, options: c || {} };
+                }
+                const p = this._pt(b);
+                if (p) return { sudut, pusat: p, options: c || {} };
+                if (typeof b === 'object' && !Array.isArray(b) && c === undefined) {
+                    return { sudut, pusat: { x: 0, y: 0 }, options: b };
+                }
+                return null;
+            }
+            const p = this._pt(a);
+            if (p && this._semuaAngka(b)) {
+                return { sudut: Number(b), pusat: p, options: c || {} };
+            }
+            return null;
+        }
+
+        // Menghitung bayangan hasil rotasi sebesar `sudut` derajat terhadap `pusat` (bawaan [0, 0]).
+        // Boleh dipanggil: hitungRotasi(objek, sudut, pusat) atau hitungRotasi(objek, pusat, sudut).
+        // Mengembalikan [x, y] untuk satu titik, atau daftar [[x, y], ...]. null jika input salah.
+        hitungRotasi(objek, sudutAtauPusat, pusatAtauSudut) {
+            const r = this._bacaRotasi(sudutAtauPusat, pusatAtauSudut, null);
+            if (!r) {
+                return this._gagal("hitungRotasi: isi (objek, sudut, pusat) atau (objek, pusat, sudut) dengan sudut berupa angka (derajat) dan pusat [x, y] / {x, y}");
+            }
+
+            const rad = r.sudut * Math.PI / 180;
+            const cos = Math.cos(rad), sin = Math.sin(rad);
+            const cx = r.pusat.x, cy = r.pusat.y;
+            const putar = t => {
+                const dx = t.x - cx, dy = t.y - cy;
+                return [cx + dx * cos - dy * sin, cy + dx * sin + dy * cos];
+            };
+
+            const satu = this._pt(objek);
+            if (satu) return putar(satu);
+
+            if (Array.isArray(objek) && objek.length > 0) {
+                const daftar = objek.map(t => this._pt(t));
+                if (daftar.every(Boolean)) return daftar.map(putar);
+            }
+            return this._gagal("hitungRotasi: objek harus titik [x, y] / {x, y} atau daftar titik");
+        }
+
+        // Menggambar bayangan hasil rotasi. Mengembalikan elemen bayangannya (titik, garis, atau poligon).
+        //   Boleh dipanggil: buatRotasi(objek, sudut, pusat, options), buatRotasi(objek, sudut, options),
+        //                    atau buatRotasi(objek, pusat, sudut, options).
+        //   options : opsi gaya bentuk (stroke, fill, dashed, label, dst) plus:
+        //     bentuk         : 2 titik -> 'garis' (bawaan) | 'segmen' | 'sinar';  3+ titik -> 'poligon' (bawaan) | 'polyline'
+        //     titik          : true = gambar juga titik di tiap titik bayangan
+        //     labelTitik     : daftar label titik bayangan, mis. ["A'", "B'", "C'"]
+        //     penghubung     : true = garis putus-putus dari titik asal ke bayangan; 'busur' = busur putar dari asal ke bayangan
+        //     gayaPenghubung : gaya penghubung, mis. { stroke: 'orange' }
+        //     titikPusat     : true = gambar juga titik pusat rotasi
+        //     labelPusat     : label untuk titik pusat rotasi
+        buatRotasi(objek, a, b, c) {
+            const r = this._bacaRotasi(a, b, c);
+            if (!r) {
+                return this._gagal("buatRotasi: isi (objek, sudut, pusat, options) atau (objek, pusat, sudut, options) dengan sudut berupa angka dan pusat [x, y] / {x, y}");
+            }
+            const options = r.options || {};
+            const hasil = this.hitungRotasi(objek, r.sudut, [r.pusat.x, r.pusat.y]);
+            if (!hasil) return null;
+
+            const tunggal = this._pt(objek) !== null;
+            const asal = tunggal ? [this._pt(objek)] : objek.map(t => this._pt(t));
+            const bayangan = tunggal ? [hasil] : hasil;
+
+            if (options.penghubung === true || options.penghubung === 'busur') {
+                const gaya = { stroke: '#888', strokeWidth: 1, dashed: true, ...(options.gayaPenghubung || {}) };
+                const pakaiBusur = options.penghubung === 'busur' || options.busurPenghubung === true;
+                asal.forEach((t, i) => {
+                    if (Math.hypot(bayangan[i][0] - t.x, bayangan[i][1] - t.y) <= 1e-9 && Math.abs(r.sudut) < 360) return;
+                    if (pakaiBusur) {
+                        const rad = Math.hypot(t.x - r.pusat.x, t.y - r.pusat.y);
+                        if (rad > 1e-9) {
+                            const awal = Math.atan2(t.y - r.pusat.y, t.x - r.pusat.x) * 180 / Math.PI;
+                            this.buatBusur(r.pusat.x, r.pusat.y, rad, awal, awal + r.sudut, {
+                                ...gaya,
+                                sweep: r.sudut >= 0 ? 1 : 0
+                            });
+                        }
+                    } else {
+                        this.buatSegmen([t.x, t.y], bayangan[i], gaya);
+                    }
+                });
+            }
+
+            if (options.titikPusat === true) {
+                this.buatTitik([r.pusat.x, r.pusat.y], {
+                    size: 3,
+                    color: options.stroke || this.svg.getAttribute('stroke') || 'black',
+                    label: options.labelPusat
+                });
+            }
+
+            return this._gambarBayangan('buatRotasi', bayangan, options);
+        }
+
+        // ===== DILATASI (PERBESARAN / PERKECILAN) =====
+
+        // Membaca argumen (faktor, pusat, options) atau (pusat, faktor, options).
+        // Pusat bawaan: [0, 0]. Mengembalikan { faktor, pusat, options } atau null.
+        _bacaDilatasi(a, b, c) {
+            if (this._semuaAngka(a)) {
+                const faktor = Number(a);
+                if (b === undefined || b === null) {
+                    return { faktor, pusat: { x: 0, y: 0 }, options: c || {} };
+                }
+                const p = this._pt(b);
+                if (p) return { faktor, pusat: p, options: c || {} };
+                if (typeof b === 'object' && !Array.isArray(b) && c === undefined) {
+                    return { faktor, pusat: { x: 0, y: 0 }, options: b };
+                }
+                return null;
+            }
+            const p = this._pt(a);
+            if (p && this._semuaAngka(b)) {
+                return { faktor: Number(b), pusat: p, options: c || {} };
+            }
+            return null;
+        }
+
+        // Menghitung bayangan hasil dilatasi dengan faktor skala `faktor` terhadap `pusat` (bawaan [0, 0]).
+        // Boleh dipanggil: hitungDilatasi(objek, faktor, pusat) atau hitungDilatasi(objek, pusat, faktor).
+        // Mengembalikan [x, y] untuk satu titik, atau daftar [[x, y], ...]. null jika input salah.
+        hitungDilatasi(objek, faktorAtauPusat, pusatAtauFaktor) {
+            const d = this._bacaDilatasi(faktorAtauPusat, pusatAtauFaktor, null);
+            if (!d || d.faktor === 0) {
+                return this._gagal("hitungDilatasi: isi (objek, faktor, pusat) atau (objek, pusat, faktor) dengan faktor skala berupa angka tidak nol dan pusat [x, y] / {x, y}");
+            }
+
+            const k = d.faktor;
+            const cx = d.pusat.x, cy = d.pusat.y;
+            const skala = t => [cx + k * (t.x - cx), cy + k * (t.y - cy)];
+
+            const satu = this._pt(objek);
+            if (satu) return skala(satu);
+
+            if (Array.isArray(objek) && objek.length > 0) {
+                const daftar = objek.map(t => this._pt(t));
+                if (daftar.every(Boolean)) return daftar.map(skala);
+            }
+            return this._gagal("hitungDilatasi: objek harus titik [x, y] / {x, y} atau daftar titik");
+        }
+
+        // Menggambar bayangan hasil dilatasi. Mengembalikan elemen bayangannya (titik, garis, atau poligon).
+        //   Boleh dipanggil: buatDilatasi(objek, faktor, pusat, options), buatDilatasi(objek, faktor, options),
+        //                    atau buatDilatasi(objek, pusat, faktor, options).
+        //   options : opsi gaya bentuk (stroke, fill, dashed, label, dst) plus:
+        //     bentuk         : 2 titik -> 'garis' (bawaan) | 'segmen' | 'sinar';  3+ titik -> 'poligon' (bawaan) | 'polyline'
+        //     titik          : true = gambar juga titik di tiap titik bayangan
+        //     labelTitik     : daftar label titik bayangan, mis. ["A'", "B'", "C'"]
+        //     penghubung     : true = garis putus-putus dari pusat melewati titik asal dan bayangannya;
+        //                      'titik' = hanya antara titik asal dan bayangannya
+        //     gayaPenghubung : gaya garis penghubung, mis. { stroke: 'orange' }
+        //     titikPusat     : true = gambar juga titik pusat dilatasi
+        //     labelPusat     : label untuk titik pusat dilatasi
+        buatDilatasi(objek, a, b, c) {
+            const d = this._bacaDilatasi(a, b, c);
+            if (!d || d.faktor === 0) {
+                return this._gagal("buatDilatasi: isi (objek, faktor, pusat, options) atau (objek, pusat, faktor, options) dengan faktor skala berupa angka tidak nol dan pusat [x, y] / {x, y}");
+            }
+            const options = d.options || {};
+            const hasil = this.hitungDilatasi(objek, d.faktor, [d.pusat.x, d.pusat.y]);
+            if (!hasil) return null;
+
+            const tunggal = this._pt(objek) !== null;
+            const asal = tunggal ? [this._pt(objek)] : objek.map(t => this._pt(t));
+            const bayangan = tunggal ? [hasil] : hasil;
+
+            if (options.penghubung === true || options.penghubung === 'pusat' || options.penghubung === 'titik') {
+                const gaya = { stroke: '#888', strokeWidth: 1, dashed: true, ...(options.gayaPenghubung || {}) };
+                const dariPusat = options.penghubung !== 'titik';
+                const pusat = [d.pusat.x, d.pusat.y];
+                asal.forEach((t, i) => {
+                    const q = bayangan[i];
+                    if (dariPusat) {
+                        if (d.faktor < 0) {
+                            // Faktor negatif: titik asal dan bayangan di sisi berlawanan terhadap pusat
+                            if (Math.hypot(q[0] - t.x, q[1] - t.y) > 1e-9) this.buatSegmen([t.x, t.y], q, gaya);
+                        } else {
+                            const jauh = Math.abs(d.faktor) >= 1 ? q : [t.x, t.y];
+                            if (Math.hypot(jauh[0] - pusat[0], jauh[1] - pusat[1]) > 1e-9) {
+                                this.buatSegmen(pusat, jauh, gaya);
+                            }
+                        }
+                    } else if (Math.hypot(q[0] - t.x, q[1] - t.y) > 1e-9) {
+                        this.buatSegmen([t.x, t.y], q, gaya);
+                    }
+                });
+            }
+
+            if (options.titikPusat === true) {
+                this.buatTitik([d.pusat.x, d.pusat.y], {
+                    size: 3,
+                    color: options.stroke || this.svg.getAttribute('stroke') || 'black',
+                    label: options.labelPusat
+                });
+            }
+
+            return this._gambarBayangan('buatDilatasi', bayangan, options);
         }
 
         // Memastikan step adalah angka yang lebih besar dari 0

@@ -31,7 +31,7 @@ Pustaka JavaScript ringan untuk menggambar **bangun geometri** sebagai SVG di br
 
 - Satu file, **tanpa dependensi**
 - Bentuk dasar sampai lanjutan: titik, garis, sinar, segmen, vektor, poligon, lingkaran, elips, busur, juring, tembereng, kurva Bézier, dan grafik fungsi
-- **Konstruksi geometri**: garis sejajar, garis tegak lurus, garis bagi, titik potong, lingkaran luar dan dalam segitiga, garis singgung, refleksi
+- **Konstruksi geometri**: garis sejajar, garis tegak lurus, garis bagi, titik potong, lingkaran luar dan dalam segitiga, garis singgung, refleksi, translasi, rotasi, dilatasi
 - Sumbu koordinat, grid, garis dimensi, tanda sama panjang, sudut, dan sudut siku-siku
 - Mode **`yUp`**: sumbu Y mengarah ke atas, seperti buku matematika
 - Label teks dan rumus **LaTeX** (butuh KaTeX atau MathJax)
@@ -300,6 +300,12 @@ Titik sudut (vertex) selalu menjadi argumen **tengah**.
 |---|---|
 | `hitungRefleksi(objek, terhadap)` | hasil pencerminan objek |
 | `buatRefleksi(objek, terhadap, opsi)` | menggambar hasil pencerminan |
+| `hitungTranslasi(objek, geser)` | hasil pergeseran objek (`geser`: `[dx, dy]`, `{x, y}`, `{dx, dy}`, `[dari, ke]`, atau dua argumen `dx, dy`) |
+| `buatTranslasi(objek, geser, opsi)` | menggambar hasil pergeseran |
+| `hitungRotasi(objek, sudut, pusat)` | hasil perputaran sebesar `sudut` derajat terhadap `pusat` (bawaan `[0, 0]`; urutan `pusat, sudut` juga diterima) |
+| `buatRotasi(objek, sudut, pusat, opsi)` | menggambar hasil perputaran |
+| `hitungDilatasi(objek, faktor, pusat)` | hasil perbesaran/perkecilan dengan skala `faktor` terhadap `pusat` (bawaan `[0, 0]`; urutan `pusat, faktor` juga diterima) |
+| `buatDilatasi(objek, faktor, pusat, opsi)` | menggambar hasil perbesaran/perkecilan |
 
 ### Sumbu, Grid, dan Pola
 
